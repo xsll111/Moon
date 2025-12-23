@@ -470,14 +470,15 @@ export async function getAvailableApiSites(user?: string): Promise<ApiSite[]> {
     return allApiSites;
   }
 
-  const userConfig = config.UserConfig.Users.find((u) => u.username === user);
-  if (!userConfig) {
+  // 从V2存储中获取用户信息
+  const userInfoV2 = await db.getUserInfoV2(user);
+  if (!userInfoV2) {
     return allApiSites;
   }
 
   // 优先根据用户自己的 enabledApis 配置查找
-  if (userConfig.enabledApis && userConfig.enabledApis.length > 0) {
-    const userApiSitesSet = new Set(userConfig.enabledApis);
+  if (userInfoV2.enabledApis && userInfoV2.enabledApis.length > 0) {
+    const userApiSitesSet = new Set(userInfoV2.enabledApis);
     return allApiSites.filter((s) => userApiSitesSet.has(s.key)).map((s) => ({
       key: s.key,
       name: s.name,
@@ -487,11 +488,11 @@ export async function getAvailableApiSites(user?: string): Promise<ApiSite[]> {
   }
 
   // 如果没有 enabledApis 配置，则根据 tags 查找
-  if (userConfig.tags && userConfig.tags.length > 0 && config.UserConfig.Tags) {
+  if (userInfoV2.tags && userInfoV2.tags.length > 0 && config.UserConfig.Tags) {
     const enabledApisFromTags = new Set<string>();
 
     // 遍历用户的所有 tags，收集对应的 enabledApis
-    userConfig.tags.forEach(tagName => {
+    userInfoV2.tags.forEach(tagName => {
       const tagConfig = config.UserConfig.Tags?.find(t => t.name === tagName);
       if (tagConfig && tagConfig.enabledApis) {
         tagConfig.enabledApis.forEach(apiKey => enabledApisFromTags.add(apiKey));

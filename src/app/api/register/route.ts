@@ -93,7 +93,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 检查用户是否已存在
+    // 检查用户是否已存在（优先使用新版本）
+    let userExists = await db.checkUserExistV2(username);
+    if (!userExists) {
+      // 回退到旧版本检查
+      userExists = await db.checkUserExist(username);
+    }
+    if (userExists) {
+      return NextResponse.json(
+        { error: '用户名已存在' },
+        { status: 409 }
+      );
+    }
+
+    // 检查配置中是否已存在
     const existingUser = config.UserConfig.Users.find((u) => u.username === username);
     if (existingUser) {
       return NextResponse.json(
@@ -131,24 +144,31 @@ export async function POST(req: NextRequest) {
 
     // 创建用户
     try {
-      // 1. 在数据库中创建用户密码
+      // 1. 使用新版本创建用户（带SHA256加密）
+      const defaultTags = siteConfig.DefaultUserTags && siteConfig.DefaultUserTags.length > 0
+        ? siteConfig.DefaultUserTags
+        : undefined;
+
+      await db.createUserV2(username, password, 'user', defaultTags);
+
+      // 2. 同时在旧版本存储中创建（保持兼容性）
       await db.registerUser(username, password);
 
-      // 2. 将用户添加到管理员配置的用户列表中
+      // 3. 将用户添加到管理员配置的用户列表中（保持兼容性）
       const newUser: any = {
         username: username,
         role: 'user',
         banned: false,
       };
 
-      // 3. 如果配置了默认用户组,分配给新用户
-      if (siteConfig.DefaultUserTags && siteConfig.DefaultUserTags.length > 0) {
-        newUser.tags = siteConfig.DefaultUserTags;
+      // 4. 如果配置了默认用户组,分配给新用户
+      if (defaultTags) {
+        newUser.tags = defaultTags;
       }
 
       config.UserConfig.Users.push(newUser);
 
-      // 4. 保存更新后的配置
+      // 5. 保存更新后的配置
       await db.saveAdminConfig(config);
 
       // 注册成功

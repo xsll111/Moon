@@ -213,7 +213,7 @@ const AlertModal = ({
                 <button
                   onClick={() => {
                     if (onConfirm) onConfirm();
-                    onClose();
+                    // 不要在这里调用onClose，让onConfirm自己决定何时关闭
                   }}
                   className={buttonStyles.danger}
                 >
@@ -422,9 +422,22 @@ interface UserConfigProps {
   config: AdminConfig | null;
   role: 'owner' | 'admin' | null;
   refreshConfig: () => Promise<void>;
+  usersV2: Array<{
+    username: string;
+    role: 'owner' | 'admin' | 'user';
+    banned: boolean;
+    tags?: string[];
+    enabledApis?: string[];
+    created_at: number;
+  }> | null;
+  userPage: number;
+  userTotalPages: number;
+  userTotal: number;
+  fetchUsersV2: (page: number) => Promise<void>;
+  userListLoading: boolean;
 }
 
-const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
+const UserConfig = ({ config, role, refreshConfig, usersV2, userPage, userTotalPages, userTotal, fetchUsersV2, userListLoading }: UserConfigProps) => {
   const { alertModal, showAlert, hideAlert } = useAlertModal();
   const { isLoading, withLoading } = useLoadingState();
   const [showAddUserForm, setShowAddUserForm] = useState(false);
@@ -482,17 +495,30 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
   // 当前登录用户名
   const currentUsername = getAuthInfoFromBrowserCookie()?.username || null;
 
+  // 判断是否有旧版用户数据需要迁移
+  const hasOldUserData = config?.UserConfig?.Users?.filter((u: any) => u.role !== 'owner').length ?? 0 > 0;
+
+  // 使用新版本用户列表（如果可用且没有旧数据），否则使用配置中的用户列表
+  const displayUsers: Array<{
+    username: string;
+    role: 'owner' | 'admin' | 'user';
+    banned?: boolean;
+    enabledApis?: string[];
+    tags?: string[];
+    created_at?: number;
+  }> = !hasOldUserData && usersV2 ? usersV2 : (config?.UserConfig?.Users || []);
+
   // 使用 useMemo 计算全选状态，避免每次渲染都重新计算
   const selectAllUsers = useMemo(() => {
     const selectableUserCount =
-      config?.UserConfig?.Users?.filter(
+      displayUsers?.filter(
         (user) =>
           role === 'owner' ||
           (role === 'admin' &&
             (user.role === 'user' || user.username === currentUsername))
       ).length || 0;
     return selectedUsers.size === selectableUserCount && selectedUsers.size > 0;
-  }, [selectedUsers.size, config?.UserConfig?.Users, role, currentUsername]);
+  }, [selectedUsers.size, displayUsers, role, currentUsername]);
 
   // 获取用户组列表
   const userGroups = config?.UserConfig?.Tags || [];
@@ -878,7 +904,7 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
         throw new Error(data.error || `操作失败: ${res.status}`);
       }
 
-      // 成功后刷新配置（无需整页刷新）
+      // 成功后刷新配置和用户列表（refreshConfig 已经是 refreshConfigAndUsers）
       await refreshConfig();
     } catch (err) {
       showError(err instanceof Error ? err.message : '操作失败', showAlert);
@@ -916,12 +942,78 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
         </h4>
         <div className='p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800'>
           <div className='text-2xl font-bold text-green-800 dark:text-green-300'>
-            {config.UserConfig.Users.length}
+            {!hasOldUserData && usersV2 ? userTotal : displayUsers.length}
           </div>
           <div className='text-sm text-green-600 dark:text-green-400'>
             总用户数
           </div>
         </div>
+
+        {/* 数据迁移提示 */}
+        {config.UserConfig.Users &&
+         config.UserConfig.Users.filter(u => u.role !== 'owner').length > 0 && (
+          <div className='mt-4 p-4 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg border border-yellow-200 dark:border-yellow-800'>
+            <div className='flex items-start justify-between'>
+              <div className='flex-1'>
+                <h5 className='text-sm font-medium text-yellow-800 dark:text-yellow-300 mb-1'>
+                  检测到旧版用户数据
+                </h5>
+                <p className='text-xs text-yellow-600 dark:text-yellow-400'>
+                  建议迁移到新的用户存储结构，以获得更好的性能和安全性。迁移后用户密码将使用SHA256加密。
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  showAlert({
+                    type: 'warning',
+                    title: '确认迁移用户数据',
+                    message: '迁移过程中请勿关闭页面。迁移完成后，所有用户密码将使用SHA256加密存储。',
+                    showConfirm: true,
+                    onConfirm: async () => {
+                      hideAlert();
+                      await withLoading('migrateUsers', async () => {
+                        try {
+                          const response = await fetch('/api/admin/migrate-users', {
+                            method: 'POST',
+                            headers: {
+                              'Content-Type': 'application/json',
+                            },
+                          });
+
+                          if (!response.ok) {
+                            const errorData = await response.json();
+                            throw new Error(errorData.error || '迁移失败');
+                          }
+
+                          showAlert({
+                            type: 'success',
+                            title: '用户数据迁移成功',
+                            message: '所有用户已迁移到新的存储结构',
+                            timer: 2000,
+                          });
+                          await refreshConfig();
+                        } catch (error: any) {
+                          console.error('迁移用户数据失败:', error);
+                          showAlert({
+                            type: 'error',
+                            title: '迁移失败',
+                            message: error.message || '迁移用户数据时发生错误',
+                          });
+                        }
+                      });
+                    },
+                  });
+                }}
+                disabled={isLoading('migrateUsers')}
+                className={`ml-4 ${buttonStyles.warning} ${
+                  isLoading('migrateUsers') ? 'opacity-50 cursor-not-allowed' : ''
+                }`}
+              >
+                {isLoading('migrateUsers') ? '迁移中...' : '立即迁移'}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 用户组管理 */}
@@ -1195,10 +1287,31 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
         )}
 
         {/* 用户列表 */}
-        <div
-          className='border border-gray-200 dark:border-gray-700 rounded-lg max-h-[28rem] overflow-y-auto overflow-x-auto relative'
-          data-table='user-list'
-        >
+        <div className='relative'>
+          {/* 迁移遮罩层 */}
+          {config.UserConfig.Users &&
+           config.UserConfig.Users.filter(u => u.role !== 'owner').length > 0 && (
+            <div className='absolute inset-0 z-20 backdrop-blur-sm bg-white/30 dark:bg-gray-900/30 rounded-lg flex items-center justify-center'>
+              <div className='bg-white dark:bg-gray-800 p-6 rounded-lg shadow-xl border border-yellow-200 dark:border-yellow-800 max-w-md'>
+                <div className='flex items-center gap-3 mb-4'>
+                  <AlertTriangle className='w-6 h-6 text-yellow-600 dark:text-yellow-400' />
+                  <h3 className='text-lg font-semibold text-gray-900 dark:text-gray-100'>
+                    需要迁移数据
+                  </h3>
+                </div>
+                <p className='text-sm text-gray-600 dark:text-gray-400 mb-4'>
+                  检测到旧版用户数据，请先迁移到新的存储结构后再进行用户管理操作。
+                </p>
+                <p className='text-xs text-gray-500 dark:text-gray-500'>
+                  请在上方的"用户统计"区域点击"立即迁移"按钮完成数据迁移。
+                </p>
+              </div>
+            </div>
+          )}
+          <div
+            className='border border-gray-200 dark:border-gray-700 rounded-lg max-h-[28rem] overflow-y-auto overflow-x-auto relative'
+            data-table='user-list'
+          >
           <table className='min-w-full divide-y divide-gray-200 dark:divide-gray-700'>
             <thead className='bg-gray-50 dark:bg-gray-900 sticky top-0 z-10'>
               <tr>
@@ -1266,8 +1379,21 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
             </thead>
             {/* 按规则排序用户：自己 -> 站长(若非自己) -> 管理员 -> 其他 */}
             {(() => {
-              const sortedUsers = [...config.UserConfig.Users].sort((a, b) => {
-                type UserInfo = (typeof config.UserConfig.Users)[number];
+              // 如果正在加载，显示加载状态
+              if (userListLoading) {
+                return (
+                  <tbody>
+                    <tr>
+                      <td colSpan={7} className='px-6 py-8 text-center text-gray-500 dark:text-gray-400'>
+                        加载中...
+                      </td>
+                    </tr>
+                  </tbody>
+                );
+              }
+
+              const sortedUsers = [...displayUsers].sort((a, b) => {
+                type UserInfo = (typeof displayUsers)[number];
                 const priority = (u: UserInfo) => {
                   if (u.username === currentUsername) return 0;
                   if (u.role === 'owner') return 1;
@@ -1506,6 +1632,62 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
               );
             })()}
           </table>
+        </div>
+
+        {/* 用户列表分页 */}
+        {!hasOldUserData && usersV2 && userTotalPages > 1 && (
+          <div className='mt-4 flex items-center justify-between px-4'>
+            <div className='text-sm text-gray-600 dark:text-gray-400'>
+              共 {userTotal} 个用户，第 {userPage} / {userTotalPages} 页
+            </div>
+            <div className='flex items-center space-x-2'>
+              <button
+                onClick={() => fetchUsersV2(1)}
+                disabled={userPage === 1}
+                className={`px-3 py-1 text-sm rounded ${
+                  userPage === 1
+                    ? 'bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-600 cursor-not-allowed'
+                    : 'bg-blue-500 hover:bg-blue-600 text-white'
+                }`}
+              >
+                首页
+              </button>
+              <button
+                onClick={() => fetchUsersV2(userPage - 1)}
+                disabled={userPage === 1}
+                className={`px-3 py-1 text-sm rounded ${
+                  userPage === 1
+                    ? 'bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-600 cursor-not-allowed'
+                    : 'bg-blue-500 hover:bg-blue-600 text-white'
+                }`}
+              >
+                上一页
+              </button>
+              <button
+                onClick={() => fetchUsersV2(userPage + 1)}
+                disabled={userPage === userTotalPages}
+                className={`px-3 py-1 text-sm rounded ${
+                  userPage === userTotalPages
+                    ? 'bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-600 cursor-not-allowed'
+                    : 'bg-blue-500 hover:bg-blue-600 text-white'
+                }`}
+              >
+                下一页
+              </button>
+              <button
+                onClick={() => fetchUsersV2(userTotalPages)}
+                disabled={userPage === userTotalPages}
+                className={`px-3 py-1 text-sm rounded ${
+                  userPage === userTotalPages
+                    ? 'bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-600 cursor-not-allowed'
+                    : 'bg-blue-500 hover:bg-blue-600 text-white'
+                }`}
+              >
+                末页
+              </button>
+            </div>
+          </div>
+        )}
         </div>
       </div>
 
@@ -2555,6 +2737,7 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
         message={alertModal.message}
         timer={alertModal.timer}
         showConfirm={alertModal.showConfirm}
+        onConfirm={alertModal.onConfirm}
       />
     </div>
   );
@@ -7758,17 +7941,67 @@ function AdminPageClient() {
     }
   }, []);
 
+  // 新版本用户列表状态
+  const [usersV2, setUsersV2] = useState<Array<{
+    username: string;
+    role: 'owner' | 'admin' | 'user';
+    banned: boolean;
+    tags?: string[];
+    enabledApis?: string[];
+    created_at: number;
+  }> | null>(null);
+
+  // 用户列表分页状态
+  const [userPage, setUserPage] = useState(1);
+  const [userTotalPages, setUserTotalPages] = useState(1);
+  const [userTotal, setUserTotal] = useState(0);
+  const [userListLoading, setUserListLoading] = useState(false);
+  const userLimit = 10;
+
+  // 获取新版本用户列表
+  const fetchUsersV2 = useCallback(async (page: number = 1) => {
+    try {
+      setUserListLoading(true);
+      const response = await fetch(`/api/admin/users?page=${page}&limit=${userLimit}`);
+      if (response.ok) {
+        const data = await response.json();
+        setUsersV2(data.users);
+        setUserTotalPages(data.totalPages || 1);
+        setUserTotal(data.total || 0);
+        setUserPage(page);
+      }
+    } catch (err) {
+      console.error('获取新版本用户列表失败:', err);
+    } finally {
+      setUserListLoading(false);
+    }
+  }, []);
+
+  // 刷新配置和用户列表
+  const refreshConfigAndUsers = useCallback(async () => {
+    await fetchConfig();
+    await fetchUsersV2();
+  }, [fetchConfig, fetchUsersV2]);
+
   useEffect(() => {
     // 首次加载时显示骨架
     fetchConfig(true);
+    // 不再自动获取用户列表，等用户打开用户管理选项卡时再获取
   }, [fetchConfig]);
 
   // 切换标签展开状态
   const toggleTab = (tabKey: string) => {
+    const wasExpanded = expandedTabs[tabKey];
+
     setExpandedTabs((prev) => ({
       ...prev,
       [tabKey]: !prev[tabKey],
     }));
+
+    // 当打开用户管理选项卡时，如果还没有加载用户列表，则加载
+    if (tabKey === 'userConfig' && !wasExpanded && !usersV2) {
+      fetchUsersV2();
+    }
   };
 
   // 新增: 重置配置处理函数
@@ -7917,7 +8150,13 @@ function AdminPageClient() {
               <UserConfig
                 config={config}
                 role={role}
-                refreshConfig={fetchConfig}
+                refreshConfig={refreshConfigAndUsers}
+                usersV2={usersV2}
+                userPage={userPage}
+                userTotalPages={userTotalPages}
+                userTotal={userTotal}
+                fetchUsersV2={fetchUsersV2}
+                userListLoading={userListLoading}
               />
             </CollapsibleTab>
 
@@ -8013,7 +8252,7 @@ function AdminPageClient() {
                 isExpanded={expandedTabs.dataMigration}
                 onToggle={() => toggleTab('dataMigration')}
               >
-                <DataMigration onRefreshConfig={fetchConfig} />
+                <DataMigration onRefreshConfig={refreshConfigAndUsers} />
               </CollapsibleTab>
             )}
           </div>

@@ -54,8 +54,21 @@ function getD1Adapter(): any {
 
   // 生产环境：Cloudflare Workers/Pages
   if (isCloudflare) {
-    console.log('Using Cloudflare D1 database');
-    return new CloudflareD1Adapter((process as any).env.DB);
+    try {
+      // 在 Cloudflare 环境中，通过 getCloudflareContext 获取 D1 绑定
+      const { getCloudflareContext } = require('@opennextjs/cloudflare');
+      const { env } = getCloudflareContext();
+
+      if (!env.DB) {
+        throw new Error('D1 database binding (DB) not found in Cloudflare environment');
+      }
+
+      console.log('Using Cloudflare D1 database');
+      return new CloudflareD1Adapter(env.DB);
+    } catch (error) {
+      console.error('Failed to initialize Cloudflare D1:', error);
+      throw error;
+    }
   }
 
   // 开发环境：better-sqlite3
